@@ -144,7 +144,7 @@ export class BrowserAgent {
         ];
       }
 
-      // 4. Parse commands
+      // 4. Parse and validate commands
       const commands = parseCommands(llmResponse);
 
       // Check for "done"
@@ -153,13 +153,35 @@ export class BrowserAgent {
         done = true;
       }
 
-      // 5. Execute (skip if just "done")
+      // 5. Validate targets against snapshot, execute only valid ones
       const executableCommands = commands.filter(c => c.action !== 'done' && c.action !== 'unknown');
+      const validIds = new Set(snapshot.actions.map(a => a.id));
+      const validCommands: typeof executableCommands = [];
+      const invalidCommands: typeof executableCommands = [];
+
+      for (const cmd of executableCommands) {
+        // Commands without targets (scroll, back, goto, wait) are always valid
+        if (!cmd.target || validIds.has(cmd.target)) {
+          validCommands.push(cmd);
+        } else {
+          invalidCommands.push(cmd);
+        }
+      }
+
+      // If there were invalid commands, append feedback to conversation
+      if (invalidCommands.length > 0) {
+        const feedback = invalidCommands.map(c => `${c.action} ${c.target}: target not found`).join('; ');
+        this.conversationHistory.push({
+          role: 'user',
+          content: `⚠ Invalid commands skipped: ${feedback}. Available action IDs: ${[...validIds].join(', ')}`,
+        });
+      }
+
       let results: ExecutionResult[] = [];
 
-      if (executableCommands.length > 0) {
+      if (validCommands.length > 0) {
         const executor = new ActionExecutor(page, snapshot, this.options.executor);
-        results = await executor.executeAll(executableCommands);
+        results = await executor.executeAll(validCommands);
         this.tracker.recordResults(results);
 
         // If navigated, check for cookie save

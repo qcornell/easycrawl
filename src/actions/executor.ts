@@ -2,15 +2,14 @@
  * ActionExecutor — The hands. Takes parsed commands and executes them
  * on a live Playwright page.
  * 
- * Design:
- * - Each action returns a result (success/fail + what changed)
- * - Human-like delays between actions (configurable)
- * - Smart element resolution: tries selector from action map first,
- *   falls back to text-based search
- * - Error recovery: if element not found, returns error (doesn't throw)
+ * Resolution strategy (in order):
+ * 1. Role + accessible name (getByRole — most reliable for Playwright)
+ * 2. Selector chain from action map (selectors[] array, tried in order)
+ * 3. Text-based heuristic search (label matching)
+ * 4. ARIA label fallback
  */
 
-import type { Page, ElementHandle, Locator } from 'playwright';
+import type { Page, Locator } from 'playwright';
 import type { ParsedCommand } from './parser';
 import type { ActionItem } from '../core/actionMap';
 import type { PageSnapshot } from '../core/snapshot';
@@ -20,25 +19,17 @@ import type { PageSnapshot } from '../core/snapshot';
 export interface ExecutionResult {
   command: ParsedCommand;
   status: 'ok' | 'error' | 'navigated';
-  /** What happened */
   message: string;
-  /** New URL if navigation occurred */
   newUrl?: string;
-  /** How long the action took (ms) */
   durationMs: number;
 }
 
 export interface ExecutorOptions {
-  /** Min delay between actions in ms (default: 200) */
-  minDelay?: number;
-  /** Max delay between actions in ms (default: 800) */
-  maxDelay?: number;
-  /** Typing delay per character in ms (default: 50) */
-  typeDelay?: number;
-  /** Timeout for finding elements (default: 10000) */
-  elementTimeout?: number;
-  /** Timeout for navigation (default: 30000) */
-  navigationTimeout?: number;
+  minDelay?: number;       // default: 200
+  maxDelay?: number;       // default: 800
+  typeDelay?: number;      // default: 50 (per char)
+  elementTimeout?: number; // default: 10000
+  navigationTimeout?: number; // default: 30000
 }
 
 // ─── Executor ────────────────────────────────────────────────
@@ -60,33 +51,21 @@ export class ActionExecutor {
     };
   }
 
-  /**
-   * Execute a list of commands sequentially.
-   * Returns results for each command.
-   */
   async executeAll(commands: ParsedCommand[]): Promise<ExecutionResult[]> {
     const results: ExecutionResult[] = [];
 
     for (const cmd of commands) {
-      // Human-like delay between actions
-      if (results.length > 0) {
-        await this.humanDelay();
-      }
+      if (results.length > 0) await this.humanDelay();
 
       const result = await this.execute(cmd);
       results.push(result);
 
-      // Stop on navigation (page changed, need re-snapshot)
       if (result.status === 'navigated') break;
-      // Stop on critical error? No — keep going, let caller decide
     }
 
     return results;
   }
 
-  /**
-   * Execute a single command.
-   */
   async execute(cmd: ParsedCommand): Promise<ExecutionResult> {
     const start = Date.now();
 
@@ -105,12 +84,7 @@ export class ActionExecutor {
         default: return { command: cmd, status: 'error', message: `Unknown action: ${cmd.action}`, durationMs: Date.now() - start };
       }
     } catch (err: any) {
-      return {
-        command: cmd,
-        status: 'error',
-        message: err.message || String(err),
-        durationMs: Date.now() - start,
-      };
+      return { command: cmd, status: 'error', message: err.message || String(err), durationMs: Date.now() - start };
     }
   }
 
@@ -121,12 +95,11 @@ export class ActionExecutor {
     if (!action) return this.notFound(cmd, start);
 
     const locator = await this.resolveElement(action);
-    if (!locator) return this.notFound(cmd, start, `Element not found in DOM: ${action.selector}`);
+    if (!locator) return this.notFound(cmd, start, `Element not found in DOM for "${action.label}" (tried ${action.selectors.length} selectors + role/text)`);
 
     const urlBefore = this.page.url();
 
-    // Click with navigation detection
-    const [response] = await Promise.all([
+    const [_nav] = await Promise.all([
       this.page.waitForNavigation({ timeout: 5000 }).catch(() => null),
       locator.click({ timeout: this.options.elementTimeout }),
     ]);
@@ -150,12 +123,20 @@ export class ActionExecutor {
     if (!action) return this.notFound(cmd, start);
 
     const locator = await this.resolveElement(action);
-    if (!locator) return this.notFound(cmd, start, `Input not found: ${action.selector}`);
+    if (!locator) return this.notFound(cmd, start, `Input not found for "${action.label}"`);
 
-    // Clear existing content first, then type with human-like delay
-    await locator.click({ timeout: this.options.elementTimeout });
-    await locator.fill(''); // Clear
-    await locator.type(cmd.value || '', { delay: this.options.typeDelay });
+    // Contenteditable elements need keyboard.type, not fill()
+    if (action.type === 'contenteditable') {
+      await locator.click({ timeout: this.options.elementTimeout });
+      // Select all existing text and replace
+      await this.page.keyboard.press('Control+A');
+      await this.page.keyboard.press('Backspace');
+      await this.page.keyboard.type(cmd.value || '', { delay: this.options.typeDelay });
+    } else {
+      await locator.click({ timeout: this.options.elementTimeout });
+      await locator.fill('');
+      await locator.type(cmd.value || '', { delay: this.options.typeDelay });
+    }
 
     return {
       command: cmd,
@@ -170,7 +151,7 @@ export class ActionExecutor {
     if (!action) return this.notFound(cmd, start);
 
     const locator = await this.resolveElement(action);
-    if (!locator) return this.notFound(cmd, start, `Select not found: ${action.selector}`);
+    if (!locator) return this.notFound(cmd, start, `Select not found for "${action.label}"`);
 
     await locator.selectOption({ label: cmd.value || '' });
 
@@ -209,154 +190,123 @@ export class ActionExecutor {
       window.scrollBy(0, dir * window.innerHeight * 0.8);
     }, direction);
 
-    return {
-      command: cmd,
-      status: 'ok',
-      message: `Scrolled ${cmd.value}`,
-      durationMs: Date.now() - start,
-    };
+    return { command: cmd, status: 'ok', message: `Scrolled ${cmd.value}`, durationMs: Date.now() - start };
   }
 
   private async execBack(cmd: ParsedCommand, start: number): Promise<ExecutionResult> {
     await this.page.goBack({ timeout: this.options.navigationTimeout });
-    return {
-      command: cmd,
-      status: 'navigated',
-      message: `Went back to ${this.page.url()}`,
-      newUrl: this.page.url(),
-      durationMs: Date.now() - start,
-    };
+    return { command: cmd, status: 'navigated', message: `Went back to ${this.page.url()}`, newUrl: this.page.url(), durationMs: Date.now() - start };
   }
 
   private async execGoto(cmd: ParsedCommand, start: number): Promise<ExecutionResult> {
     if (!cmd.value) return { command: cmd, status: 'error', message: 'No URL provided', durationMs: Date.now() - start };
-
-    await this.page.goto(cmd.value, {
-      timeout: this.options.navigationTimeout,
-      waitUntil: 'domcontentloaded',
-    });
-
-    return {
-      command: cmd,
-      status: 'navigated',
-      message: `Navigated to ${cmd.value}`,
-      newUrl: this.page.url(),
-      durationMs: Date.now() - start,
-    };
+    await this.page.goto(cmd.value, { timeout: this.options.navigationTimeout, waitUntil: 'domcontentloaded' });
+    return { command: cmd, status: 'navigated', message: `Navigated to ${cmd.value}`, newUrl: this.page.url(), durationMs: Date.now() - start };
   }
 
   private async execWait(cmd: ParsedCommand, start: number): Promise<ExecutionResult> {
-    // Wait for any pending network activity to settle
     try {
       await this.page.waitForLoadState('networkidle', { timeout: 10000 });
-    } catch {
-      // Timed out waiting for network idle — that's OK
-    }
-
-    return {
-      command: cmd,
-      status: 'ok',
-      message: 'Waited for page to settle',
-      durationMs: Date.now() - start,
-    };
+    } catch { /* timeout is fine */ }
+    return { command: cmd, status: 'ok', message: 'Waited for page to settle', durationMs: Date.now() - start };
   }
 
-  // ─── Element Resolution ──────────────────────────────────
+  // ─── Element Resolution (4-tier) ─────────────────────────
 
-  /**
-   * Find an ActionItem by ID (e.g., "a7")
-   */
   private findAction(id: string): ActionItem | undefined {
     return this.snapshot.actions.find(a => a.id === id);
   }
 
   /**
-   * Resolve an ActionItem to a Playwright Locator.
-   * Tries multiple strategies:
-   * 1. CSS selector from action map
-   * 2. Text-based search
-   * 3. ARIA label search
+   * Resolve an ActionItem to a visible Playwright Locator.
+   * 
+   * Strategy order:
+   * 1. getByRole + name (most reliable for Playwright)
+   * 2. Selector chain from action map (selectors[])
+   * 3. Text-based heuristic search
+   * 4. ARIA label fallback
    */
   private async resolveElement(action: ActionItem): Promise<Locator | null> {
-    // Strategy 1: Direct CSS selector
-    if (action.selector) {
+    // Strategy 1: Role + accessible name (Playwright-native, most resilient)
+    if (action.role && action.ariaName) {
       try {
-        const locator = this.page.locator(action.selector).first();
-        if (await locator.count() > 0) {
-          // Verify it's visible
-          const visible = await locator.isVisible().catch(() => false);
-          if (visible) return locator;
-        }
-      } catch {
-        // Invalid selector — try next strategy
-      }
+        const roleLoc = this.page.getByRole(action.role as any, { name: action.ariaName, exact: false }).first();
+        if (await this.isUsable(roleLoc)) return roleLoc;
+      } catch { /* role not supported or no match */ }
     }
 
-    // Strategy 2: Text-based search
-    if (action.label) {
-      const candidates: Locator[] = [];
-
-      // Exact text match
-      switch (action.type) {
-        case 'button':
-          candidates.push(
-            this.page.locator(`button:has-text("${escapeQuotes(action.label)}")`).first(),
-            this.page.locator(`[role="button"]:has-text("${escapeQuotes(action.label)}")`).first(),
-            this.page.locator(`input[type="submit"][value="${escapeQuotes(action.label)}"]`).first(),
-          );
-          break;
-        case 'link':
-        case 'nav':
-          candidates.push(
-            this.page.locator(`a:has-text("${escapeQuotes(action.label)}")`).first(),
-          );
-          break;
-        case 'input':
-        case 'textarea':
-          candidates.push(
-            this.page.locator(`label:has-text("${escapeQuotes(action.label)}") + input`).first(),
-            this.page.locator(`label:has-text("${escapeQuotes(action.label)}") + textarea`).first(),
-            this.page.locator(`[placeholder="${escapeQuotes(action.placeholder || action.label)}"]`).first(),
-            this.page.locator(`[aria-label="${escapeQuotes(action.label)}"]`).first(),
-          );
-          break;
-        case 'select':
-          candidates.push(
-            this.page.locator(`label:has-text("${escapeQuotes(action.label)}") + select`).first(),
-            this.page.locator(`select[aria-label="${escapeQuotes(action.label)}"]`).first(),
-          );
-          break;
-        case 'checkbox':
-        case 'radio':
-          candidates.push(
-            this.page.locator(`label:has-text("${escapeQuotes(action.label)}") input[type="${action.type}"]`).first(),
-          );
-          break;
-      }
-
-      for (const loc of candidates) {
+    // Strategy 2: Selector chain (ordered best → worst)
+    if (action.selectors) {
+      for (const sel of action.selectors) {
         try {
-          if (await loc.count() > 0) {
-            const visible = await loc.isVisible().catch(() => false);
-            if (visible) return loc;
-          }
-        } catch {
-          continue;
-        }
+          const loc = this.page.locator(sel).first();
+          if (await this.isUsable(loc)) return loc;
+        } catch { /* invalid selector — skip */ }
       }
     }
 
-    // Strategy 3: ARIA label
+    // Strategy 3: Text-based search (for buttons/links)
     if (action.label) {
-      const ariaLoc = this.page.locator(`[aria-label="${escapeQuotes(action.label)}"]`).first();
+      const textCandidates = this.getTextCandidates(action);
+      for (const loc of textCandidates) {
+        try {
+          if (await this.isUsable(loc)) return loc;
+        } catch { continue; }
+      }
+    }
+
+    // Strategy 4: Placeholder (for inputs)
+    if (action.placeholder) {
       try {
-        if (await ariaLoc.count() > 0 && await ariaLoc.isVisible().catch(() => false)) {
-          return ariaLoc;
-        }
+        const loc = this.page.getByPlaceholder(action.placeholder, { exact: false }).first();
+        if (await this.isUsable(loc)) return loc;
       } catch { /* nope */ }
     }
 
     return null;
+  }
+
+  /**
+   * Generate text-based candidate locators based on action type.
+   */
+  private getTextCandidates(action: ActionItem): Locator[] {
+    const label = action.label;
+    switch (action.type) {
+      case 'button':
+        return [
+          this.page.getByRole('button', { name: label, exact: false }).first(),
+          this.page.locator(`button >> text="${label}"`).first(),
+          this.page.locator(`[role="button"] >> text="${label}"`).first(),
+        ];
+      case 'link':
+      case 'nav':
+        return [
+          this.page.getByRole('link', { name: label, exact: false }).first(),
+          this.page.locator(`a >> text="${label}"`).first(),
+        ];
+      case 'input':
+      case 'textarea':
+      case 'contenteditable':
+        return [
+          this.page.getByLabel(label, { exact: false }).first(),
+          this.page.getByPlaceholder(label, { exact: false }).first(),
+        ];
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * Check if a locator points to a visible, attached element.
+   */
+  private async isUsable(locator: Locator): Promise<boolean> {
+    try {
+      const count = await locator.count();
+      if (count === 0) return false;
+      return await locator.isVisible().catch(() => false);
+    } catch {
+      return false;
+    }
   }
 
   // ─── Helpers ─────────────────────────────────────────────
@@ -367,22 +317,10 @@ export class ActionExecutor {
   }
 
   private notFound(cmd: ParsedCommand, start: number, detail?: string): ExecutionResult {
-    return {
-      command: cmd,
-      status: 'error',
-      message: detail || `Action ${cmd.target} not found in snapshot`,
-      durationMs: Date.now() - start,
-    };
+    return { command: cmd, status: 'error', message: detail || `Action ${cmd.target} not found in snapshot`, durationMs: Date.now() - start };
   }
 
-  /**
-   * Update the snapshot (call after navigation or dynamic content changes).
-   */
   updateSnapshot(snapshot: PageSnapshot): void {
     this.snapshot = snapshot;
   }
-}
-
-function escapeQuotes(s: string): string {
-  return s.replace(/"/g, '\\"');
 }

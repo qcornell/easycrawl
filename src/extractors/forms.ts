@@ -4,6 +4,10 @@ import type { FormInfo, FormField } from '../core/snapshot';
 /**
  * Extract all forms and their fields from the page.
  * Classifies each form by purpose (contact, login, search, subscribe, etc.)
+ * 
+ * IMPORTANT: domId fields are ONLY set when the element has a real `id` attribute
+ * in the HTML. The `id` field is always set (synthetic if needed) for internal
+ * tracking only — never use it as a CSS selector.
  */
 export function extractForms($: CheerioAPI, baseUrl: string): FormInfo[] {
   const forms: FormInfo[] = [];
@@ -15,7 +19,7 @@ export function extractForms($: CheerioAPI, baseUrl: string): FormInfo[] {
 
     const action = $form.attr('action') || '';
     const method = ($form.attr('method') || 'GET').toUpperCase();
-    const formId = $form.attr('id') || `form${counter}`;
+    const realId = $form.attr('id') || '';
 
     const fields: FormField[] = [];
     let fieldCounter = 0;
@@ -30,15 +34,15 @@ export function extractForms($: CheerioAPI, baseUrl: string): FormInfo[] {
 
       fieldCounter++;
       const name = $field.attr('name') || '';
-      const id = $field.attr('id') || '';
+      const realFieldId = $field.attr('id') || '';
       const placeholder = $field.attr('placeholder') || '';
       const required = $field.attr('required') !== undefined || $field.attr('aria-required') === 'true';
       const value = $field.attr('value') || '';
 
       // Try to find label
       let label = '';
-      if (id) {
-        const $label = $(`label[for="${id}"]`);
+      if (realFieldId) {
+        const $label = $(`label[for="${realFieldId}"]`);
         if ($label.length) label = $label.text().replace(/\s+/g, ' ').trim();
       }
       if (!label) {
@@ -58,7 +62,12 @@ export function extractForms($: CheerioAPI, baseUrl: string): FormInfo[] {
       }
 
       fields.push({
-        id: id || `${formId}_field${fieldCounter}`,
+        // Internal ID (for tracking only — NOT a DOM selector)
+        id: realFieldId || `_form${counter}_field${fieldCounter}`,
+        // Real DOM id (only set when element actually has one)
+        domId: realFieldId || undefined,
+        // Real DOM name attribute
+        domName: name || undefined,
         type: fieldEl.tagName === 'textarea' ? 'textarea' : fieldEl.tagName === 'select' ? 'select' : type,
         label: label.substring(0, 80),
         name,
@@ -76,7 +85,10 @@ export function extractForms($: CheerioAPI, baseUrl: string): FormInfo[] {
     const purpose = classifyForm($form, action, fields);
 
     forms.push({
-      id: formId,
+      // Internal ID (for tracking — NOT a DOM selector)
+      id: realId || `_form${counter}`,
+      // Real DOM id (only when form actually has id attribute)
+      domId: realId || undefined,
       action: resolveAction(action, baseUrl),
       method,
       purpose,

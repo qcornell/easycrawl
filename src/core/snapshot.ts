@@ -50,7 +50,12 @@ export interface ImageInfo {
 }
 
 export interface FormField {
+  /** Internal tracking ID (may be synthetic — NOT safe as CSS selector) */
   id: string;
+  /** Real DOM id attribute (only set when element actually has one) */
+  domId?: string;
+  /** Real DOM name attribute */
+  domName?: string;
   type: string; // text, email, password, tel, number, textarea, select, checkbox, radio, file, hidden
   label: string;
   name: string;
@@ -61,7 +66,10 @@ export interface FormField {
 }
 
 export interface FormInfo {
+  /** Internal tracking ID (may be synthetic — NOT safe as CSS selector) */
   id: string;
+  /** Real DOM id attribute (only set when form actually has one) */
+  domId?: string;
   action: string;
   method: string;
   purpose: string; // contact, login, signup, search, subscribe, checkout, other

@@ -212,6 +212,9 @@ function formatAction(a: ActionItem): string {
       return `  #${a.id.slice(1)} [CHECKBOX] "${a.label}"${a.value ? ` = ${a.value}` : ''}`;
     case 'radio':
       return `  #${a.id.slice(1)} [RADIO] "${a.label}"${a.value ? ` = ${a.value}` : ''}`;
+    case 'contenteditable':
+      const cePh = a.placeholder ? ` — "${a.placeholder}"` : '';
+      return `  #${a.id.slice(1)} [EDITOR] "${a.label}"${cePh}`;
     default:
       return `  #${a.id.slice(1)} [${tag}] "${a.label}"`;
   }

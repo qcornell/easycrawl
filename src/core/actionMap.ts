@@ -7,7 +7,7 @@ export interface ActionItem {
   /** Unique numbered ID: "a1", "a2", etc. */
   id: string;
   /** Action type */
-  type: 'nav' | 'link' | 'button' | 'input' | 'textarea' | 'select' | 'checkbox' | 'radio' | 'file';
+  type: 'nav' | 'link' | 'button' | 'input' | 'textarea' | 'select' | 'checkbox' | 'radio' | 'file' | 'contenteditable';
   /** Human-readable label */
   label: string;
   /** What this action does (for LLM context) */
@@ -24,10 +24,31 @@ export interface ActionItem {
   options?: string[];
   /** For inputs: current value */
   value?: string;
-  /** CSS selector to find this element */
-  selector: string;
-  /** Parent form ID if inside a form */
-  formId?: string;
+  /**
+   * Ordered list of CSS selectors to try (best → worst).
+   * First one that matches a visible element wins.
+   * All selectors are Playwright-compatible (no Cheerio-only pseudo-classes).
+   */
+  selectors: string[];
+  /** ARIA role hint for Playwright getByRole resolution */
+  role?: string;
+  /** Accessible name for Playwright getByRole({ name }) */
+  ariaName?: string;
+  /** Parent form selector (for scoping) */
+  formSelector?: string;
+
+  // Legacy compat — first selector
+  get selector(): string;
+}
+
+/**
+ * Build a single ActionItem with the selectors getter.
+ */
+function makeAction(fields: Omit<ActionItem, 'selector'>): ActionItem {
+  return {
+    ...fields,
+    get selector() { return this.selectors[0] || ''; },
+  };
 }
 
 // ─── Action Map Builder ──────────────────────────────────────
@@ -50,90 +71,154 @@ export function buildActionMap(
 
   // 1. Navigation links (from pre-extracted nav)
   for (const nav of navigation) {
-    const id = nextId();
-    actions.push({
-      id,
+    actions.push(makeAction({
+      id: nextId(),
       type: 'nav',
       label: nav.text,
       href: nav.href,
       purpose: nav.active ? 'current page' : 'navigate',
-      selector: `a[href="${nav.href}"]`,
-    });
+      selectors: [`a[href="${nav.href}"]`],
+      role: 'link',
+      ariaName: nav.text,
+    }));
   }
 
   // 2. Form fields (from pre-extracted forms)
   for (const form of forms) {
+    // Build a reliable form selector (NOT the synthetic ID)
+    const formDomId = form.domId; // real DOM id or undefined
+    const formSelector = formDomId
+      ? `#${formDomId}`
+      : (form.action && form.action !== baseUrl
+        ? `form[action="${form.action}"]`
+        : undefined);
+
     for (const field of form.fields) {
       if (field.type === 'hidden') continue;
 
-      const id = nextId();
       const actionType = (['textarea', 'select', 'checkbox', 'radio', 'file'].includes(field.type)
         ? field.type
         : 'input') as ActionItem['type'];
 
-      actions.push({
-        id,
+      // Build selector chain: real DOM id → name → placeholder → scoped label
+      const fieldSelectors: string[] = [];
+      if (field.domId) {
+        fieldSelectors.push(`#${field.domId}`);
+      }
+      if (field.name) {
+        const nameSelector = `[name="${field.name}"]`;
+        fieldSelectors.push(formSelector ? `${formSelector} ${nameSelector}` : nameSelector);
+      }
+      if (field.placeholder) {
+        fieldSelectors.push(`[placeholder="${field.placeholder}"]`);
+      }
+      if (field.type === 'textarea') {
+        if (formSelector) fieldSelectors.push(`${formSelector} textarea`);
+      }
+      // Fallback: aria-label
+      if (field.label) {
+        fieldSelectors.push(`[aria-label="${field.label}"]`);
+      }
+
+      const label = field.label || field.name || field.placeholder || field.type;
+      const role = actionType === 'input' ? 'textbox'
+        : actionType === 'textarea' ? 'textbox'
+        : actionType === 'select' ? 'combobox'
+        : actionType === 'checkbox' ? 'checkbox'
+        : actionType === 'radio' ? 'radio'
+        : undefined;
+
+      actions.push(makeAction({
+        id: nextId(),
         type: actionType,
-        label: field.label || field.name || field.placeholder || field.type,
+        label,
         inputType: field.type,
         required: field.required,
         placeholder: field.placeholder,
         options: field.options,
         value: field.value,
-        selector: field.id ? `#${field.id}` : `[name="${field.name}"]`,
-        formId: form.id,
+        selectors: fieldSelectors,
+        role,
+        ariaName: label,
+        formSelector,
         purpose: form.purpose,
-      });
+      }));
     }
 
     // Add form submit button
-    const id = nextId();
-    actions.push({
-      id,
+    const submitSelectors: string[] = [];
+    if (formSelector) {
+      submitSelectors.push(
+        `${formSelector} button[type="submit"]`,
+        `${formSelector} input[type="submit"]`,
+        `${formSelector} button:last-of-type`,
+      );
+    } else {
+      submitSelectors.push(
+        'form button[type="submit"]',
+        'form input[type="submit"]',
+      );
+    }
+
+    actions.push(makeAction({
+      id: nextId(),
       type: 'button',
       label: 'Submit' + (form.purpose !== 'other' ? ` (${form.purpose})` : ''),
       purpose: `submit-${form.purpose}`,
-      selector: form.id ? `#${form.id} button[type="submit"], #${form.id} input[type="submit"]` : 'form button[type="submit"]',
-      formId: form.id,
-    });
+      selectors: submitSelectors,
+      role: 'button',
+      ariaName: 'Submit',
+      formSelector,
+    }));
   }
 
   // 3. Standalone buttons (not in forms, not nav)
   $('button, [role="button"], input[type="button"]').each((_, el) => {
     const $el = $(el);
-    // Skip if inside a form (already handled)
     if ($el.closest('form').length) return;
-    // Skip if it's a nav element
     if ($el.closest('nav, header').length && $el.find('a').length) return;
 
-    const text = $el.text().trim() || $el.attr('aria-label') || $el.attr('title') || '';
+    const text = ($el.text().trim() || $el.attr('aria-label') || $el.attr('title') || '').replace(/\s+/g, ' ');
     if (!text || text.length > 100) return;
 
     const key = `btn:${text}`;
     if (seen.has(key)) return;
     seen.add(key);
 
-    const classes = $el.attr('class') || '';
-    const id_attr = $el.attr('id') || '';
-    const selector = id_attr ? `#${id_attr}` : classes ? `button.${classes.split(/\s+/)[0]}` : `button:contains("${text.substring(0, 30)}")`;
+    const idAttr = $el.attr('id') || '';
+    const ariaLabel = $el.attr('aria-label') || '';
+    const testId = $el.attr('data-testid') || '';
 
-    actions.push({
+    // Build Playwright-compatible selectors (NO :contains)
+    const selectors: string[] = [];
+    if (idAttr) selectors.push(`#${idAttr}`);
+    if (testId) selectors.push(`[data-testid="${testId}"]`);
+    if (ariaLabel) selectors.push(`[aria-label="${ariaLabel}"]`);
+    // Role-based text match — Playwright-safe
+    // We store label/role and let executor use getByRole
+    // CSS fallback: class-based if unique enough
+    const classes = $el.attr('class') || '';
+    if (classes) {
+      const firstClass = classes.split(/\s+/).find(c => c.length > 2 && !/^(w-|h-|p-|m-|flex|grid|text|bg|border)/.test(c));
+      if (firstClass) selectors.push(`button.${firstClass}`);
+    }
+
+    actions.push(makeAction({
       id: nextId(),
       type: 'button',
       label: text,
       purpose: guessButtonPurpose(text, classes),
-      selector,
-    });
+      selectors,
+      role: 'button',
+      ariaName: ariaLabel || text,
+    }));
   });
 
   // 4. Important links (not nav, not in forms)
   $('a[href]').each((_, el) => {
     const $el = $(el);
-    // Skip nav links (already handled)
     if ($el.closest('nav, header').length) return;
-    // Skip form links
     if ($el.closest('form').length) return;
-    // Skip footer (too noisy for action map)
     if ($el.closest('footer').length) return;
 
     const href = $el.attr('href') || '';
@@ -142,7 +227,6 @@ export function buildActionMap(
     const text = $el.text().trim();
     if (!text || text.length > 80 || text.length < 2) return;
 
-    // Only include "call to action" style links
     const classes = ($el.attr('class') || '').toLowerCase();
     const isCTA = /btn|button|cta|action|primary|hero/i.test(classes) ||
       /learn more|get started|sign up|contact|book|schedule|download|try/i.test(text.toLowerCase());
@@ -153,14 +237,55 @@ export function buildActionMap(
     if (seen.has(key)) return;
     seen.add(key);
 
-    actions.push({
+    actions.push(makeAction({
       id: nextId(),
       type: 'link',
       label: text,
       href: resolveUrl(href, baseUrl),
       purpose: 'navigate',
-      selector: `a[href="${href}"]`,
-    });
+      selectors: [`a[href="${href}"]`],
+      role: 'link',
+      ariaName: text,
+    }));
+  });
+
+  // 5. Contenteditable elements (tweet composers, rich editors, etc.)
+  $('[contenteditable="true"], [contenteditable=""], [role="textbox"]').each((_, el) => {
+    const $el = $(el);
+    // Skip if inside a form (already covered)
+    if ($el.closest('form').length) return;
+
+    const ariaLabel = $el.attr('aria-label') || '';
+    const testId = $el.attr('data-testid') || '';
+    const role = $el.attr('role') || '';
+    const placeholder = $el.attr('data-placeholder') || $el.attr('placeholder') || $el.attr('aria-placeholder') || '';
+    const idAttr = $el.attr('id') || '';
+
+    // Build a label from available hints
+    const label = ariaLabel || placeholder || testId || 'Text editor';
+
+    // Dedup
+    const key = `ce:${label}:${testId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const selectors: string[] = [];
+    if (testId) selectors.push(`[data-testid="${testId}"]`);
+    if (idAttr) selectors.push(`#${idAttr}`);
+    if (ariaLabel) selectors.push(`[aria-label="${ariaLabel}"]`);
+    if (role === 'textbox') selectors.push('[role="textbox"]');
+    selectors.push('[contenteditable="true"]');
+
+    actions.push(makeAction({
+      id: nextId(),
+      type: 'contenteditable',
+      label,
+      placeholder: placeholder || undefined,
+      selectors,
+      role: 'textbox',
+      ariaName: label,
+      purpose: 'text-input',
+    }));
   });
 
   return actions;
