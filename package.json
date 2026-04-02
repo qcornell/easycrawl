@@ -1,0 +1,43 @@
+{
+  "name": "easycrawl",
+  "version": "0.1.0",
+  "description": "Browser intelligence for cheap AI models. Pre-digests web pages into structured, numbered action maps that any LLM can reason about.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --test test/",
+    "example": "tsx examples/basic-crawl.ts"
+  },
+  "keywords": [
+    "ai",
+    "browser",
+    "crawl",
+    "llm",
+    "agent",
+    "automation",
+    "scraper",
+    "web",
+    "action-map",
+    "mcp"
+  ],
+  "author": "Dappily",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "playwright": "^1.52.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ]
+}
