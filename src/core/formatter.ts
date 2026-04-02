@@ -52,11 +52,12 @@ function formatStandard(s: PageSnapshot): string {
     lines.push('');
   }
 
-  // Key content (headings + first few paragraphs)
+  // Key content (headings + paragraphs + posts/tweets)
   const headings = s.content.filter(c => c.type === 'heading');
   const paragraphs = s.content.filter(c => c.type === 'paragraph');
+  const posts = s.content.filter(c => c.type === 'post');
 
-  if (headings.length > 0 || paragraphs.length > 0) {
+  if (headings.length > 0 || paragraphs.length > 0 || posts.length > 0) {
     lines.push('Content:');
     for (const h of headings.slice(0, 5)) {
       const prefix = h.level ? '#'.repeat(h.level) + ' ' : '# ';
@@ -65,6 +66,17 @@ function formatStandard(s: PageSnapshot): string {
     for (const p of paragraphs.slice(0, 3)) {
       const truncated = p.text.length > 200 ? p.text.substring(0, 200) + '…' : p.text;
       lines.push(`  ${truncated}`);
+    }
+    if (posts.length > 0) {
+      lines.push('');
+      lines.push(`  Feed (${posts.length} posts):`);
+      for (const post of posts.slice(0, 5)) {
+        const truncated = post.text.length > 200 ? post.text.substring(0, 200) + '…' : post.text;
+        lines.push(`  📝 ${truncated}`);
+      }
+      if (posts.length > 5) {
+        lines.push(`  ... and ${posts.length - 5} more posts`);
+      }
     }
     lines.push('');
   }
@@ -146,6 +158,9 @@ function formatDetailed(s: PageSnapshot): string {
           break;
         case 'email':
           lines.push(`  ✉️ ${c.text}`);
+          break;
+        case 'post':
+          lines.push(`  📝 ${c.text}`);
           break;
         default:
           lines.push(`  [${c.type}] ${c.text}`);
@@ -230,7 +245,9 @@ To interact with the page, respond with one or more commands:
 
 COMMANDS:
   click #N          — Click button or link #N
-  fill #N "text"    — Type text into input #N
+  fill #N "text"    — Type text into input/editor #N
+  press Enter       — Press a key (Enter, Tab, Escape, etc.)
+  press Enter on #N — Focus element #N first, then press key
   select #N "opt"   — Select option in dropdown #N
   check #N          — Check checkbox #N
   uncheck #N        — Uncheck checkbox #N
@@ -243,7 +260,8 @@ COMMANDS:
 RULES:
 - Use the # numbers from the action list (e.g., "click #7" not "click Send Message")
 - You can chain multiple commands, one per line
-- After filling a form, use "click #N" on the submit button
+- For search boxes: use "fill #N" then "press Enter" (NOT click submit — search dropdowns block clicks)
+- For text editors ([EDITOR] type): use "fill #N" to type into them
 - If the page doesn't have what you need, use navigation or "goto URL"
 - Say "done" with a brief summary when the task is complete
 - If you're stuck, describe what you see and what you need`;

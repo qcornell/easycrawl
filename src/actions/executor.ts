@@ -73,6 +73,7 @@ export class ActionExecutor {
       switch (cmd.action) {
         case 'click': return await this.execClick(cmd, start);
         case 'fill': return await this.execFill(cmd, start);
+        case 'press': return await this.execPress(cmd, start);
         case 'select': return await this.execSelect(cmd, start);
         case 'check': return await this.execCheck(cmd, true, start);
         case 'uncheck': return await this.execCheck(cmd, false, start);
@@ -99,10 +100,22 @@ export class ActionExecutor {
 
     const urlBefore = this.page.url();
 
-    const [_nav] = await Promise.all([
-      this.page.waitForNavigation({ timeout: 5000 }).catch(() => null),
-      locator.click({ timeout: this.options.elementTimeout }),
-    ]);
+    // Try normal click first; if intercepted by overlay, retry with force
+    try {
+      const [_nav] = await Promise.all([
+        this.page.waitForNavigation({ timeout: 5000 }).catch(() => null),
+        locator.click({ timeout: this.options.elementTimeout }),
+      ]);
+    } catch (err: any) {
+      if (err.message?.includes('intercepts pointer events')) {
+        // Overlay blocking — retry with force click
+        await locator.click({ force: true, timeout: this.options.elementTimeout });
+        // Wait for any dialog/modal to appear
+        await this.page.waitForTimeout(1000);
+      } else {
+        throw err;
+      }
+    }
 
     const urlAfter = this.page.url();
     const navigated = urlAfter !== urlBefore;
@@ -125,10 +138,15 @@ export class ActionExecutor {
     const locator = await this.resolveElement(action);
     if (!locator) return this.notFound(cmd, start, `Input not found for "${action.label}"`);
 
-    // Contenteditable elements need keyboard.type, not fill()
-    if (action.type === 'contenteditable') {
-      await locator.click({ timeout: this.options.elementTimeout });
-      // Select all existing text and replace
+    // Detect contenteditable: check type flag or probe element
+    const isContentEditable = action.type === 'contenteditable'
+      || action.role === 'textbox'
+      || await locator.evaluate(el => el.getAttribute('contenteditable') === 'true').catch(() => false);
+
+    if (isContentEditable) {
+      // Contenteditable elements need keyboard.type, not fill()
+      await locator.click({ force: true, timeout: this.options.elementTimeout });
+      await this.page.waitForTimeout(300);
       await this.page.keyboard.press('Control+A');
       await this.page.keyboard.press('Backspace');
       await this.page.keyboard.type(cmd.value || '', { delay: this.options.typeDelay });
@@ -142,6 +160,45 @@ export class ActionExecutor {
       command: cmd,
       status: 'ok',
       message: `Filled "${action.label}" with "${cmd.value}"`,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  private async execPress(cmd: ParsedCommand, start: number): Promise<ExecutionResult> {
+    const key = cmd.value || 'Enter';
+
+    // If target specified, focus that element first
+    if (cmd.target) {
+      const action = this.findAction(cmd.target);
+      if (action) {
+        const locator = await this.resolveElement(action);
+        if (locator) {
+          await locator.focus().catch(() => locator.click({ timeout: this.options.elementTimeout }));
+        }
+      }
+    }
+
+    const urlBefore = this.page.url();
+
+    await this.page.keyboard.press(key);
+
+    // Wait a beat for potential navigation/state change
+    await this.page.waitForTimeout(500);
+    
+    const urlAfter = this.page.url();
+    const navigated = urlAfter !== urlBefore;
+
+    if (navigated) {
+      await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    }
+
+    return {
+      command: cmd,
+      status: navigated ? 'navigated' : 'ok',
+      message: navigated
+        ? `Pressed ${key} → navigated to ${urlAfter}`
+        : `Pressed ${key}${cmd.target ? ` on ${cmd.target}` : ''}`,
+      newUrl: navigated ? urlAfter : undefined,
       durationMs: Date.now() - start,
     };
   }

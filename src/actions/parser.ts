@@ -4,9 +4,9 @@
  */
 
 export interface ParsedCommand {
-  action: 'click' | 'fill' | 'select' | 'check' | 'uncheck' | 'scroll' | 'back' | 'goto' | 'done' | 'wait' | 'unknown';
+  action: 'click' | 'fill' | 'select' | 'check' | 'uncheck' | 'scroll' | 'press' | 'back' | 'goto' | 'done' | 'wait' | 'unknown';
   target?: string; // action ID like "a7" or "#7"
-  value?: string;  // text for fill/select, URL for goto, direction for scroll
+  value?: string;  // text for fill/select, URL for goto, direction for scroll, key for press
   raw: string;     // original text
 }
 
@@ -50,6 +50,18 @@ function parseSingleCommand(line: string): ParsedCommand | null {
   match = clean.match(/^scroll\s+(up|down)/i);
   if (match) return { action: 'scroll', value: match[1].toLowerCase(), raw: line };
 
+  // "press Enter" / "press Enter on #4" / "press Tab" / "press Escape"
+  match = clean.match(/^press\s+(\w+)(?:\s+(?:on\s+)?#?a?(\d+))?/i);
+  if (match) return { action: 'press', value: match[1], target: match[2] ? `a${match[2]}` : undefined, raw: line };
+
+  // "hit Enter" (alias)
+  match = clean.match(/^hit\s+(\w+)(?:\s+(?:on\s+)?#?a?(\d+))?/i);
+  if (match) return { action: 'press', value: match[1], target: match[2] ? `a${match[2]}` : undefined, raw: line };
+
+  // "submit #4" (shorthand for press Enter on a field)
+  match = clean.match(/^submit\s+#?a?(\d+)/i);
+  if (match) return { action: 'press', value: 'Enter', target: `a${match[1]}`, raw: line };
+
   // "back"
   if (/^back$/i.test(clean)) return { action: 'back', raw: line };
 
@@ -70,6 +82,10 @@ function parseSingleCommand(line: string): ParsedCommand | null {
   // If the model just says a number, treat it as a click
   match = clean.match(/^#?(\d+)$/);
   if (match) return { action: 'click', target: `a${match[1]}`, raw: line };
+
+  // Fuzzy extraction: model says it in prose like "Scrolling down now" or "I will scroll down"
+  if (/scroll(?:ing)?\s+down/i.test(clean)) return { action: 'scroll', value: 'down', raw: line };
+  if (/scroll(?:ing)?\s+up/i.test(clean)) return { action: 'scroll', value: 'up', raw: line };
 
   return null;
 }

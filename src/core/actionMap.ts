@@ -249,11 +249,24 @@ export function buildActionMap(
     }));
   });
 
-  // 5. Contenteditable elements (tweet composers, rich editors, etc.)
-  $('[contenteditable="true"], [contenteditable=""], [role="textbox"]').each((_, el) => {
+  // 5. Contenteditable elements (tweet composers, rich editors, FB compose modals, etc.)
+  // Also catch bare [role="textbox"][contenteditable] with zero attributes (Facebook)
+  const ceSelector = [
+    '[contenteditable="true"]',
+    '[contenteditable=""]',
+    '[role="textbox"]',
+  ].join(', ');
+
+  $(ceSelector).each((_, el) => {
     const $el = $(el);
-    // Skip if inside a form (already covered)
+    // Skip if inside a form (already covered by form extraction)
     if ($el.closest('form').length) return;
+    // Skip invisible / aria-hidden
+    if ($el.attr('aria-hidden') === 'true') return;
+    // Must actually be contenteditable
+    const ce = $el.attr('contenteditable');
+    const isTextbox = $el.attr('role') === 'textbox';
+    if (ce !== 'true' && ce !== '' && !isTextbox) return;
 
     const ariaLabel = $el.attr('aria-label') || '';
     const testId = $el.attr('data-testid') || '';
@@ -261,11 +274,21 @@ export function buildActionMap(
     const placeholder = $el.attr('data-placeholder') || $el.attr('placeholder') || $el.attr('aria-placeholder') || '';
     const idAttr = $el.attr('id') || '';
 
-    // Build a label from available hints
-    const label = ariaLabel || placeholder || testId || 'Text editor';
+    // Check if this editor is inside a dialog (compose modal)
+    const inDialog = $el.closest('[role="dialog"]').length > 0;
+    const dialogLabel = inDialog ? ($el.closest('[role="dialog"]').attr('aria-label') || '') : '';
+    // Also check sibling dialogs (FB nests dialog > div > dialog > editor)
+    const nearbyDialogLabel = !dialogLabel && inDialog
+      ? ($el.parents('[role="dialog"]').last().attr('aria-label') || '')
+      : dialogLabel;
 
-    // Dedup
-    const key = `ce:${label}:${testId}`;
+    // Build a label from available hints
+    const label = ariaLabel || placeholder || testId
+      || (nearbyDialogLabel ? `${nearbyDialogLabel} editor` : '')
+      || (inDialog ? 'Compose editor' : 'Text editor');
+
+    // Dedup — use a broader key to avoid missing bare editors
+    const key = `ce:${label}:${inDialog}:${testId}`;
     if (seen.has(key)) return;
     seen.add(key);
 
@@ -273,7 +296,13 @@ export function buildActionMap(
     if (testId) selectors.push(`[data-testid="${testId}"]`);
     if (idAttr) selectors.push(`#${idAttr}`);
     if (ariaLabel) selectors.push(`[aria-label="${ariaLabel}"]`);
-    if (role === 'textbox') selectors.push('[role="textbox"]');
+    // Scope to dialog if inside one (avoids matching wrong editor)
+    if (inDialog && isTextbox) {
+      selectors.push('[role="dialog"] [role="textbox"][contenteditable="true"]');
+    } else if (inDialog) {
+      selectors.push('[role="dialog"] [contenteditable="true"]');
+    }
+    if (isTextbox) selectors.push('[role="textbox"][contenteditable="true"]');
     selectors.push('[contenteditable="true"]');
 
     actions.push(makeAction({

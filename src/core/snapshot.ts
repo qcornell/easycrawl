@@ -34,7 +34,7 @@ export interface NavItem {
 }
 
 export interface ContentBlock {
-  type: 'heading' | 'paragraph' | 'list' | 'list-item' | 'quote' | 'address' | 'phone' | 'email' | 'code' | 'table' | 'other';
+  type: 'heading' | 'paragraph' | 'list' | 'list-item' | 'quote' | 'address' | 'phone' | 'email' | 'code' | 'table' | 'post' | 'other';
   text: string;
   level?: number; // for headings: 1-6
   tag?: string;
