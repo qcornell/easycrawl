@@ -8,7 +8,9 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node --test test/",
-    "example": "tsx examples/basic-crawl.ts"
+    "example": "tsx examples/basic-crawl.ts",
+    "serve": "tsx src/server.ts",
+    "serve:build": "node dist/server.js"
   },
   "keywords": [
     "ai",
